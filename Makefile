@@ -11,4 +11,4 @@ builddocker:
 	docker build -t "mongmx/gotest" .
 
 startdocker:
-	sudo docker run -dt -p 8080:8080 --name gotest mongmx/gotest
+	docker run -dt -p 8080:8080 --name gotest mongmx/gotest
