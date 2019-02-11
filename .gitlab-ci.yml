@@ -1,0 +1,97 @@
+stages:
+  - build-go
+  - build-docker
+  - deploy-dev
+  # - test-integration
+
+build-dev:go:
+  stage: build-go
+  only:
+    - develop
+  image: golang:latest
+  variables:
+    REPO_NAME: gitlab.com/credit9/cloud
+  before_script:
+    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
+    - eval $(ssh-agent -s)
+    # 1. Generate key: ssh-keygen -t rsa -C "payment-v1" -b 4096 -N "" -f /tmp/deploy_key
+    # 2. set $SSH_PRIVATE_KEY variable to the base64: cat /tmp/deploy_key | base64 -w0
+    # 3. add public key `deploy_key.pub` into target repository (with write permissions).
+    - echo "$DEPLOY_PRIVATE_KEY" | tr -d ' ' | base64 --decode | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - '[[ -f /.dockerenv ]] && echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config'
+    - git config --global url."git@gitlab.com:".insteadOf "https://gitlab.com/"
+    # prepare project directory
+    - mkdir -p $GOPATH/src/$(dirname $REPO_NAME)
+    - ln -svf $CI_PROJECT_DIR $GOPATH/src/$REPO_NAME
+    - cd $GOPATH/src/$REPO_NAME
+    # - cp -r $GOPATH/src/$REPO_NAME/vendor/ $GOPATH/src/
+  script:
+    - echo "Building the app go"
+    # - go get ./...
+    - env GO111MODULE=on go mod vendor
+    - env GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GO111MODULE=on go build -o $CI_PROJECT_DIR/app -a -ldflags '-w -s' main.go
+  artifacts:
+    untracked: true
+
+build-dev:docker:
+  stage: build-docker
+  dependencies: 
+    - build-dev:go
+  only:
+    - develop
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    - echo "Building the app docker"
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" .
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+
+deploy-dev:
+  stage: deploy-dev
+  image: alpine:latest
+  only:
+    - develop
+  before_script:
+    - 'which ssh-agent || ( apk --update add openssh-client )'
+    - eval $(ssh-agent -s)
+    - echo "$DEPLOY_PRIVATE_KEY" | tr -d ' ' | base64 -d | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+  script:
+    - echo "Deploy to staging server"
+    - ssh -tt "$C9_HOST"  
+      'sudo docker login registry.gitlab.com -u gitlab+deploy-token-22175 -p 1o9eRH5bVNSYqMn7q7f7 
+      && sudo docker stop c9test 
+      && sudo docker rm -v c9test 
+      && sudo docker pull registry.gitlab.com/credit9/cloud:develop 
+      && sudo docker run -dt -p 8080:8080 -v /tmp/test.c9-cloud:/tmp 
+      -v /home/mongmx/www/credit9-ui/staging/admin/dist:/admin/static --name c9test -e "APP_MODE=development" 
+      --restart unless-stopped --log-driver=syslog --log-opt tag="c9test" registry.gitlab.com/credit9/cloud:develop' 
+    #  sudo docker login registry.gitlab.com -u "$CI_DEPLOY_USER" -p "$CI_DEPLOY_PASSWORD" 
+  environment:
+    name: staging
+    url: https://credit9.io
+
+# test-integration:
+#   stage: test-integration
+#   image: mongmx/robot-framework-alpine
+#   only:
+#     - develop
+#   before_script:
+#     - /opt/bin/mockws -port=8888 &
+#     - GEOMETRY="${SCREEN_WIDTH}x${SCREEN_HEIGHT}x${SCREEN_DEPTH}"
+#     - Xvfb :99 -screen 0 $GEOMETRY &
+#     - export DISPLAY=:99
+#   script:
+#     - echo "Testing on staging server"
+#     - pybot $CI_PROJECT_DIR/tests/robot/*.robot
+#   artifacts:
+#     reports:
+#       junit: output.xml
+#     untracked: true
